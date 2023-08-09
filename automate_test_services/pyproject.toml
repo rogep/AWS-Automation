@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "automate-test-services"
+version = "0.1.0"
+description = ""
+authors = ["ephraim.rogers <ephraim.rogers@consilium.technology>"]
+readme = "README.md"
+#packages = [{include = "automate_test_services"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.1.1"
+aws-lambda-powertools = "^2.22.0"
+boto3-stubs = {extras = ["ec2", "ecs", "rds"], version = "^1.28.22"}
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
