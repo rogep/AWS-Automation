@@ -1,4 +1,3 @@
-import json
 from datetime import date, datetime
 from typing import Any
 
@@ -36,7 +35,7 @@ def lambda_handler(
 ) -> dict[str, Any]:
     services = event.dict()
     env_vars = get_environment_variables()
-    processing_time = datetime.now()
+    processing_time = datetime.now().time()
     services_started = []
     services_stopped = []
 
@@ -71,7 +70,6 @@ def lambda_handler(
 
     return {
         'statusCode': 200,
-        'body': json.dumps('Hello from Lambda!'),
         'servicesStopped': services_stopped,
         'servicesStarted': services_started,
         'processing_time': processing_time.isoformat(),

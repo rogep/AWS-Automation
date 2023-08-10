@@ -1,4 +1,4 @@
-from abc import ABC, abstractclassmethod
+from abc import ABC, abstractmethod
 
 from mypy_boto3_ec2 import EC2Client
 from mypy_boto3_ec2 import ECSClient
@@ -15,16 +15,17 @@ class ServiceEvent(BaseModel):
 
 class AWSStrategy(ABC):
 
-    @abstractclassmethod
+    @abstractmethod
     def stop_services(self) -> None:
         pass
 
     # *args, **kwargs is for future implementation to extend ecs
-    @abstractclassmethod
+    @abstractmethod
     def start_services(self, *args, **kwargs) -> None:
         pass
 
 
+# TODO: add logging
 class RDS(AWSStrategy):
     def __init__(
             self,
@@ -102,9 +103,14 @@ class ECS(AWSStrategy):
     def _get_service_metadata(self) -> list[list[str]]:
         """Extract cluster and service names from
            arn:aws:ecs:<region>:<acc-id>:service/<cluster>/<service>"""
-        response = self._client.list_services()
-        # if no cluster is defined, then we get a ClusterNotFoundException
-        metadata = [x.split['/'][1:] for x in response['clusterArns']]
+        try:
+            response = self._client.list_services()
+            # if no cluster is defined, then we get a ClusterNotFoundException
+            # add this exception if i can find it in mypy
+            metadata = [x.split['/'][1:] for x in response['clusterArns']]
+        except Exception as err:
+            # logger.info(f"No ECS Cluster(s) provisioned!\n Error: {err}")
+            metadata = []
         return metadata
 
 

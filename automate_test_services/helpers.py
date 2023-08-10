@@ -11,17 +11,17 @@ class EnvironmentVariableMissing(Exception):
 
 
 class EnvVar(BaseModel):
-    weekday_start: datetime.datetime
-    weekday_end: datetime.datetime
-    weekend_start: datetime.datetime
-    weekend_end: datetime.datetime
+    weekday_start: datetime.time
+    weekday_end: datetime.time
+    weekend_start: datetime.time
+    weekend_end: datetime.time
 
     @validator(
         ["weekday_start", "weekday_end", "weekend_start", "weekend_end"],
         pre=True,
     )
     def parse_date(cls, value):
-        return datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S").date()
+        return datetime.datetime.strptime(value, "%H:%M:%S").time()
 
 
 def get_environment_variables() -> EnvVar:
