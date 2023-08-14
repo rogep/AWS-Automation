@@ -1,0 +1,275 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create an SNS Topic to publish results for AWS Config Rule Access-Key-Rotation. Creates an Automation Document for distributing info on noncompliant Access Keys to an SNS distro. To accomplish this, creates an AWS Systems Manager Automation Document creates a role to allow AWS Config to execute SSM Automation Documents, execute the configservice list-discovered-resources API call, and publish to the SNS topic passed in enables the AWS Config Rule access-keys-rotated hooks up the Automation Document created as the Config rule's automatic remediation action
+
+Parameters:
+  SNSTopic:
+    Type: String
+    Description: The SNS Topic to be used for sending notifications regarding noncompliant Access Keys
+  KMSKeyArn:
+    Type: String
+    Description: The KMS Key to be used for encrypting notifications
+  MaximumExecutionFrequency:
+    Type: String
+    Default: TwentyFour_Hours
+    Description: The frequency that you want AWS Config to run evaluations for the rule.
+    MinLength: '1'
+    ConstraintDescription: This parameter is required.
+    AllowedValues:
+      - One_Hour
+      - Three_Hours
+      - Six_Hours
+      - Twelve_Hours
+      - TwentyFour_Hours
+  maxAccessKeyAge:
+    Type: String
+    Default: '90'
+    Description: Maximum number of days without rotation. Default 90.
+    MinLength: '1'
+    ConstraintDescription: This parameter is required.
+
+Resources:
+  AccessKeyRotationRemediationRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Description: Policies required for Config to execute SSM and SSM to execute Config API call and publish to SNS
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole'
+      Policies:
+        - PolicyName: AccessKeyRotationConfigListResourcesPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'config:ListDiscoveredResources'
+                Resource: '*'
+        - PolicyName: AccessKeyRotationPublishToSnsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'sns:Publish'
+                Resource: !Ref SNSTopic
+        - PolicyName: AccessKeyKmsKeyAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey*'
+                Resource: !Ref KMSKeyArn
+      RoleName: AccessKeyRotationRemediationRole
+
+  # Build IAM Role for Config
+  AWSIAM:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWS_ConfigRole'
+      Path: /
+      Policies:
+        - PolicyName: S3-access
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                Resource: !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref AWSConfigS3Bucket
+                    - /AWSLogs/
+                    - !Ref 'AWS::AccountId'
+                    - /*
+                Condition:
+                  StringLike:
+                    's3:x-amz-acl': bucket-owner-full-control
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketAcl'
+                Resource: !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref AWSConfigS3Bucket
+
+  # Create Config Delivery Channel
+  DeliveryChannel:
+    Type: 'AWS::Config::DeliveryChannel'
+    Properties:
+      S3BucketName: !Ref AWSConfigS3Bucket
+
+  AccessKeyRotationAutomationDoc:
+    Type: "AWS::SSM::Document"
+    Properties:
+      Content:
+        description: Automation Document For resolving a User from a ResourceId
+        schemaVersion: "0.3"
+        assumeRole: "{{ AutomationAssumeRole }}"
+        parameters:
+          ResourceId:
+            type: String
+            description: (Required) The ResourceId of a User
+          AutomationAssumeRole:
+            type: String
+            description: >-
+              (Optional) The ARN of the role that allows Automation to perform the actions on your behalf.
+        mainSteps:
+          - name: resolveUsername
+            action: "aws:executeAwsApi"
+            inputs:
+              Service: config
+              Api: ListDiscoveredResources
+              resourceType: "AWS::IAM::User"
+              resourceIds:
+                - "{{ResourceId}}"
+            outputs:
+              - Name: configUserName
+                Selector: "$.resourceIdentifiers[0].resourceName"
+                Type: String
+          - name: publishMessage
+            action: "aws:executeAutomation"
+            maxAttempts: 1
+            timeoutSeconds: 30
+            onFailure: Abort
+            inputs:
+              DocumentName: AWS-PublishSNSNotification
+              RuntimeParameters:
+                TopicArn: !Ref SNSTopic
+                Message: Account "{{global:ACCOUNT_ID}}" User "{{resolveUsername.configUserName}}" needs to rotate their Access Key
+        outputs:
+          - resolveUsername.configUserName
+      DocumentType: Automation
+
+  # KMS S3 Config Service encryption key
+  S3ConfigKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-s3config
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  # Build AWS Config Service S3 Bucket for Storage
+  AWSConfigS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${S3ConfigKeyAlias}'
+              SSEAlgorithm: 'aws:kms'
+
+  S3ConfigKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/s3config
+      TargetKeyId:
+        Ref: S3ConfigKey
+
+  AWSConfigAccessKeyRotationRule:
+    Type: 'AWS::Config::ConfigRule'
+    Properties:
+      ConfigRuleName: access-keys-rotated
+      Description: >-
+        Checks whether the active access keys are rotated within the number of days specified in maxAccessKeyAge. The rule is non-compliant if the access keys have not been rotated for more than  maxAccessKeyAge number of days.
+      InputParameters:
+        maxAccessKeyAge: !If
+          - maxAccessKeyAge
+          - !Ref maxAccessKeyAge
+          - !Ref 'AWS::NoValue'
+      Scope: {}
+      Source:
+        Owner: AWS
+        SourceIdentifier: ACCESS_KEYS_ROTATED
+      MaximumExecutionFrequency: !Ref MaximumExecutionFrequency
+
+  AWSConfigAccessKeyRotationRuleRemediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Properties:
+      ConfigRuleName: !Ref AWSConfigAccessKeyRotationRule
+      Automatic: true
+      MaximumAutomaticAttempts: 2
+      RetryAttemptSeconds: 60
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':role/AccessKeyRotationRemediationRole'
+        ResourceId:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      TargetId: !Ref AccessKeyRotationAutomationDoc
+      TargetType: "SSM_DOCUMENT"
+  ConfigRecorder:
+    Type: 'AWS::Config::ConfigurationRecorder'
+    Properties:
+      Name: 'ConfigRecoder'
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+      RoleARN: !GetAtt
+        - AWSIAM
+        - Arn
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Required
+        Parameters:
+          - maxAccessKeyAge
+          - KMSKeyArn
+          - SNSTopic
+      - Label:
+          default: Optional
+        Parameters: []
+Conditions:
+  maxAccessKeyAge: !Not
+    - !Equals
+      - ''
+      - !Ref maxAccessKeyAge
+
+Outputs:
+  RoleCreated:
+    Description: The IAM Role that was created
+    Value: !Ref AccessKeyRotationRemediationRole
+  SSMDocumentCreated:
+    Description: The System Manager Automation Document that was created
+    Value: !Ref AccessKeyRotationAutomationDoc
+  AWSConfigRuleEnabled:
+    Description: The AWS Config Rule that was enabled
+    Value: !Ref AWSConfigAccessKeyRotationRule
+  AWSIAM:
+    Description: 'IAM Role for Config'
+    Value: !Ref AWSIAM
